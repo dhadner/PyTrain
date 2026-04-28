@@ -10,7 +10,7 @@ def main():
     parser.add_argument("--checkpoint", default="checkpoint.pt", help="Path to model checkpoint")
     parser.add_argument("--prompt", default="Once upon a time", help="Text prompt to start generation")
     parser.add_argument("--tokens", type=int, default=300, help="Number of tokens to generate")
-    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_k", type=int, default=40)
     args = parser.parse_args()
 
@@ -22,9 +22,16 @@ def main():
     model.eval()
 
     encoder = tiktoken.get_encoding("gpt2")
+    eot_id = encoder.eot_token  # 50256
     idx = torch.tensor([encoder.encode(args.prompt)], device=device)
     tokens = model.generate(idx, max_new_tokens=args.tokens, temperature=args.temperature, top_k=args.top_k)
-    print(encoder.decode(tokens[0].tolist()))
+    token_list = tokens[0].tolist()
+
+    # Trim at the first end-of-text token (if any)
+    if eot_id in token_list:
+        token_list = token_list[:token_list.index(eot_id)]
+
+    print(encoder.decode(token_list))
 
 
 if __name__ == "__main__":

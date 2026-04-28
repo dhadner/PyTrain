@@ -34,6 +34,31 @@ The first run downloads TinyStories (~1.92 GB raw text) and tokenizes it into a 
 
 Default training run on a 40-core M-series GPU: ~45 minutes for 4000 steps.
 
+### Generating text
+
+**Basic usage** (uses the default prompt `"Once upon a time"`):
+```bash
+python generate.py
+```
+
+**With your own prompt:**
+```bash
+python generate.py --prompt "Once upon a time there was a little girl who"
+```
+
+**All options:**
+```
+--checkpoint   Path to the saved model file     (default: checkpoint.pt)
+--prompt       Text to start generation from    (default: "Once upon a time")
+--tokens       Number of new tokens to generate (default: 300)
+--temperature  Randomness control               (default: 0.7)
+--top_k        Vocabulary cap per step          (default: 40)
+```
+
+[Temperature](#g-temperature) scales the [logits](#g-logits) (the model's raw, unnormalized output scores for each token) to control generation randomness: lower values make output more deterministic and repetitive; higher values make it more diverse and incoherent. [Top-k](#g-topk) limits sampling to the $k$ most probable tokens at each step, preventing rare outlier tokens from derailing generation.
+
+**A note on output quality.** This is a 51M-parameter model trained on a children's story corpus. It will produce grammatical, story-shaped text, but don't expect strong long-range consistency — character names may drift mid-story, plot threads may not resolve, and morals may appear or not at random. These are fundamental limitations of the model's size, not bugs. For best results, use simple names common in children's stories (e.g. "Tom", "Lily", "Sam") and keep `--temperature` at 0.7 or below.
+
 ---
 
 ## Software structure
@@ -72,28 +97,7 @@ Three classes:
 
 ### `generate.py` — inference
 
-Loads a [checkpoint](#g-checkpoint), encodes a prompt, samples `--tokens` new tokens [autoregressively](#g-autoregressive), and prints the decoded output.
-
-**Basic usage** (uses the default prompt `"Once upon a time"`):
-```bash
-python generate.py
-```
-
-**With your own prompt:**
-```bash
-python generate.py --prompt "Once upon a time there was a little girl who"
-```
-
-**All options:**
-```
---checkpoint   Path to the saved model file     (default: checkpoint.pt)
---prompt       Text to start generation from    (default: "Once upon a time")
---tokens       Number of new tokens to generate (default: 300)
---temperature  Randomness control               (default: 0.8)
---top_k        Vocabulary cap per step          (default: 40)
-```
-
-[Temperature](#g-temperature) scales the [logits](#g-logits) (the model's raw, unnormalized output scores for each token) to control generation randomness: lower values make output more deterministic and repetitive; higher values make it more diverse and incoherent. [Top-k](#g-topk) limits sampling to the $k$ most probable tokens at each step, preventing rare outlier tokens from derailing generation.
+Loads a [checkpoint](#g-checkpoint), encodes a prompt, samples `--tokens` new tokens [autoregressively](#g-autoregressive), and prints the decoded output. See the [Generating text](#generating-text) section above for usage and all options.
 
 ### `requirements.txt`
 
