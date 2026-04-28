@@ -1,0 +1,70 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXGroup section */
+		F45ABE592FA04ABA00D4EB0B = {
+			isa = PBXGroup;
+			children = (
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXProject section */
+		F45ABE5A2FA04ABA00D4EB0B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2640;
+			};
+			buildConfigurationList = F45ABE5D2FA04ABA00D4EB0B /* Build configuration list for PBXProject "PyTrain" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = F45ABE592FA04ABA00D4EB0B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+			);
+		};
+/* End PBXProject section */
+
+/* Begin XCBuildConfiguration section */
+		F45ABE5E2FA04ABA00D4EB0B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		F45ABE5F2FA04ABA00D4EB0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F45ABE5D2FA04ABA00D4EB0B /* Build configuration list for PBXProject "PyTrain" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F45ABE5E2FA04ABA00D4EB0B /* Debug */,
+				F45ABE5F2FA04ABA00D4EB0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F45ABE5A2FA04ABA00D4EB0B /* Project object */;
+}
