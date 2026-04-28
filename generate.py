@@ -8,7 +8,7 @@ from model import GPT
 def main():
     parser = argparse.ArgumentParser(description="Generate text from a trained model")
     parser.add_argument("--checkpoint", default="checkpoint.pt", help="Path to model checkpoint")
-    parser.add_argument("--prompt", default="ROMEO:", help="Text prompt to start generation")
+    parser.add_argument("--prompt", default="Once upon a time", help="Text prompt to start generation")
     parser.add_argument("--tokens", type=int, default=300, help="Number of tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top_k", type=int, default=40)
