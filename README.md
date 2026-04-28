@@ -29,10 +29,11 @@ pip install -r requirements.txt
 python train.py     # downloads ~2GB, tokenizes once, then trains
 python generate.py  # samples from the saved checkpoint
 ```
+`train.py` performs the training step and generates the model weights from the training files.  `generate.py` can be run as many times as desired to perform the inference step with your own prompts.
 
-The first run downloads TinyStories (~1.92 GB raw text) and tokenizes it into a cached `.pt` [tensor](#g-tensor) (~3.7 GB). Subsequent runs reuse the cache.
+The first run of `train.py` downloads TinyStories (~1.92 GB raw text) and tokenizes it into a cached `.pt` [tensor](#g-tensor) (~3.7 GB). Subsequent runs reuse the cache.
 
-Default training run on a 40-core M-series GPU: ~45 minutes for 4000 steps.
+Default training run on a 40-core M-series GPU (MPS): ~45 minutes for 4000 steps. A CUDA GPU (NVIDIA) is similar or faster. CPU-only — a plain Windows or Linux PC with no GPU — will also work; PyTorch falls back automatically, but expect roughly 10–20× slower, putting the full training run at several hours.
 
 ### Generating text
 
@@ -47,13 +48,14 @@ python generate.py --prompt "Once upon a time there was a little girl who"
 ```
 
 **All options:**
-```
---checkpoint   Path to the saved model file     (default: checkpoint.pt)
---prompt       Text to start generation from    (default: "Once upon a time")
---tokens       Number of new tokens to generate (default: 300)
---temperature  Randomness control               (default: 0.7)
---top_k        Vocabulary cap per step          (default: 40)
-```
+
+| Option | Description |
+|---|---|
+| `‑‑checkpoint` | Path to the saved model file (default: `checkpoint.pt`) |
+| `‑‑prompt` | Text to start generation from (default: `"Once upon a time"`) |
+| `‑‑tokens` | Maximum tokens to generate; output may be shorter if the model ends the story naturally (default: `300`) |
+| `‑‑temperature` | Randomness control (default: `0.7`) |
+| `‑‑top_k` | Vocabulary cap per step (default: `40`) |
 
 [Temperature](#g-temperature) scales the [logits](#g-logits) (the model's raw, unnormalized output scores for each token) to control generation randomness: lower values make output more deterministic and repetitive; higher values make it more diverse and incoherent. [Top-k](#g-topk) limits sampling to the $k$ most probable tokens at each step, preventing rare outlier tokens from derailing generation.
 
@@ -81,7 +83,7 @@ Three classes:
 
 ### `dataset.py` — data pipeline
 
-- Downloads TinyStories from Hugging Face on first run (`TinyStories-train.txt`, `TinyStories-valid.txt`).
+- Downloads TinyStories from Hugging Face on first run: two files, `TinyStories-train.txt` (~1.89 GB, ~2.2M stories) and `TinyStories-valid.txt` (~3.6 MB, ~4K stories). The split is deliberate: the model only *learns* from the training file. The validation file is a small, separate set of stories the model has never seen during training, used purely to measure how well it generalises to new data.
 - Tokenizes with the GPT-2 *[BPE](#g-bpe)* (byte-pair encoding) encoder via [`tiktoken`](#g-tiktoken). BPE is a subword scheme: common substrings get their own token id, rare ones are spelled out from shorter pieces — so the [vocabulary](#g-vocabulary) stays bounded but the tokenizer never has to fall back to characters. We pass `<|endoftext|>` through as the special token id `50256` so we can recognize document boundaries downstream.
 - Caches the tokenized tensors as `data/tinystories-{train,valid}-eot.pt`. Re-tokenization is skipped on subsequent runs.
 - `TokenDataset` precomputes a `doc_ids` tensor of the same length as the token tensor, where `doc_ids[i]` = index of the document containing position `i`. `__getitem__` returns `(x, y, doc_ids_chunk)` for a random offset.
@@ -89,10 +91,15 @@ Three classes:
 ### `train.py` — training loop
 
 - Defines `CONFIG` (model [hyperparameters](#g-hyperparameter)) and `TRAIN` (optimization [hyperparameters](#g-hyperparameter)).
-- Builds the model on MPS (Apple GPU) / CUDA / CPU.
+- Automatically selects the best available device: CUDA (NVIDIA GPU) → MPS (Apple Silicon GPU) → CPU. No configuration needed; the code falls back gracefully to CPU if no GPU is present.
 - Uses [`AdamW`](#g-adamw) with a custom `LambdaLR` schedule: [linear warmup](#g-warmup) for 200 steps, then [cosine decay](#g-cosine-decay) to 10% of peak learning rate.
 - Uses `RandomSampler(replacement=True)` instead of shuffling — at 470M tokens, a full permutation would allocate 3.75 GB; sampling with replacement is O(batch) memory.
-- Prints a single line every 200 steps with `(step, lr, train_loss, val_loss, elapsed)`.
+- Runs for exactly 4000 steps, then stops automatically — no user intervention is needed. At the end it saves `checkpoint.pt` and prints a short sample generation. 4000 steps was chosen empirically: each step processes a batch of 64 sequences × 256 tokens = ~16K tokens, so 4000 steps exposes the model to ~65M tokens — enough for the loss curve to plateau on a model this size, and it completes in ~45 minutes on Apple Silicon. To train longer or shorter, edit `"max_steps"` in the `TRAIN` dict at the top of `train.py`.
+- Prints a progress line every 200 steps:
+  ```
+  Step  3800 | lr 6.00e-05 | train loss 1.2814 | val loss 1.3391 | 135.7s
+  ```
+  `train loss` and `val loss` are [cross-entropy](#g-cross-entropy) in natural-log units (nats). A randomly-initialised model starts near $\ln(50257) \approx 10.8$ (maximally confused); this model reaches ~1.3–1.4 by the end of training (corresponding to the validation perplexity ≈ 3.8 quoted at the top). A small, stable gap between the two (val slightly above train) is normal. If val loss stops falling while train loss keeps dropping, the model is *overfitting* — memorising training data rather than learning general patterns.
 - Saves a [checkpoint](#g-checkpoint) and generates a sample story at the end.
 
 ### `generate.py` — inference

@@ -24,7 +24,7 @@ def main():
     encoder = tiktoken.get_encoding("gpt2")
     eot_id = encoder.eot_token  # 50256
     idx = torch.tensor([encoder.encode(args.prompt)], device=device)
-    tokens = model.generate(idx, max_new_tokens=args.tokens, temperature=args.temperature, top_k=args.top_k)
+    tokens = model.generate(idx, max_new_tokens=args.tokens, temperature=args.temperature, top_k=args.top_k, stop_at=eot_id)
     token_list = tokens[0].tolist()
 
     # Trim at the first end-of-text token (if any)
