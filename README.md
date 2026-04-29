@@ -16,6 +16,12 @@ At the highest level, every language model — from this tiny project to GPT-4 �
 
 **Inference** is the generation phase. Once training is finished, the parameters are frozen — no more learning. You feed the model a prompt and it predicts one token at a time, appending each predicted token to the input and repeating until it decides to stop (or you cut it off). Compared to training, inference is far less demanding: there is only one forward pass per token (no gradient computation, no optimizer), and the model only needs to fit in memory once rather than keep gradients and optimizer state around too. That is why ChatGPT can run a response on a handful of GPUs per query, and why on-device models can run on a phone or laptop — though inference still requires meaningful processing power, especially as context length grows.
 
+*A note on modern production LLMs.* What actually gets fed to the model at inference time isn't just the user's message. The inference pipeline assembles a single token sequence from multiple sources: operator-written system instructions (defining the model's persona and constraints), prior conversation turns, and sometimes documents retrieved on-the-fly from an external store (a technique called *retrieval-augmented generation*, or RAG). The model itself is unaware of these boundaries — it simply predicts the next token given whatever token sequence it receives, regardless of where each segment came from. In a typical ChatGPT exchange, the user's actual message may be a small fraction of the tokens the model processes. This project has none of that machinery: the context window is exactly and only what you pass to `--prompt`, the model has no persistent memory between calls to `generate.py`, and any "personality" in the output comes entirely from patterns in the TinyStories training corpus, not from instructions injected at runtime. For the specific question of context assembly, the underlying math is identical — both this model and a system like ChatGPT run the same transformer forward pass on a flat token sequence, and the model is unaware of how that sequence was assembled. The difference lies entirely in the pipeline that constructs the input.
+
+That said, many production systems also differ from this model *architecturally* in ways context assembly alone does not explain. Most notably, large models are widely believed to use *Mixture-of-Experts* (MoE): rather than a single shared MLP in each transformer block, a learned router dispatches each token to a small subset of parallel "expert" feed-forward networks, keeping computation sub-linear in the total number of parameters. Separately, many deployments use *speculative decoding* at inference time, where a small fast draft model proposes candidate tokens and a larger verifier model accepts or rejects them in parallel — two models cooperating rather than one running serially. Neither technique changes the transformer's fundamental input-output contract (token sequence in, logit distribution out), but both go well beyond what a single-network model like this one captures. See [References](#references) below for pointers to some of these.
+
+*If you've ever wondered how a model can usefully answer questions about a document you've just pasted in — a codebase, a policy manual, a datasheet — without having been trained on it, see [Appendix: How RAG works](#appendix-how-rag-works--documents-as-context-not-training-data). The short answer is that the document becomes part of the token sequence, and self-attention does the rest.*
+
 Everything in this repository illustrates both phases: `train.py` runs [training](#g-parameter), and `generate.py` runs [inference](#g-inference).
 
 ---
@@ -568,3 +574,91 @@ Integers are used at this stage because a token id is a *lookup key*, not a numb
 <a id="g-warmup"></a>**Warmup** — A training technique where the [learning rate](#g-learning-rate) starts near zero and ramps up linearly over the first few hundred steps. Allows the optimizer's running statistics (means and variances of [gradients](#g-gradient)) to stabilize before large [gradient](#g-gradient) steps are taken.
 
 <a id="g-weight-tying"></a>**Weight tying** — Reusing the same weight matrix for both the token embedding (input) and the output projection (final layer). Reduces the [parameter](#g-parameter) count by ~25M in this model and encourages the input and output representations of each token to remain consistent.
+
+---
+
+## References
+
+Key papers behind the techniques and claims in this README.
+
+**Architecture**
+
+- Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). [Attention Is All You Need.](https://arxiv.org/abs/1706.03762) *NeurIPS 2017.* The original Transformer paper; introduces self-attention, multi-head attention, and the encoder–decoder architecture that GPT's decoder-only stack descends from.
+- Radford, A., Wu, J., Child, R., et al. (2019). [Language Models are Unsupervised Multitask Learners.](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) *OpenAI Blog.* GPT-2: the architecture, weight tying, and BPE tokenizer this project directly inherits.
+
+**Training techniques**
+
+- Loshchilov, I. & Hutter, F. (2019). [Decoupled Weight Decay Regularization.](https://arxiv.org/abs/1711.07275) *ICLR 2019.* AdamW optimizer.
+- Hendrycks, D. & Gimpel, K. (2016). [Gaussian Error Linear Units (GELUs).](https://arxiv.org/abs/1606.08415) GELU activation function.
+- Press, O. & Wolf, L. (2017). [Using the Output Embedding to Improve Language Models.](https://arxiv.org/abs/1608.05859) *EACL 2017.* Weight tying between token embedding and output head.
+- Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). [Layer Normalization.](https://arxiv.org/abs/1607.06450) LayerNorm.
+
+**Dataset & tokenization**
+
+- Eldan, R. & Li, Y. (2023). [TinyStories: How Small Can Language Models Be and Still Speak Coherent English?](https://arxiv.org/abs/2305.07759) The training corpus used in this project.
+- Sennrich, R., Haddow, B., & Birch, A. (2016). [Neural Machine Translation of Rare Words with Subword Units.](https://arxiv.org/abs/1508.07909) *ACL 2016.* The BPE tokenization algorithm.
+
+**Production system context**
+
+- Ouyang, L., Wu, J., Jiang, X., et al. (2022). [Training language models to follow instructions with human feedback.](https://arxiv.org/abs/2203.02155) *NeurIPS 2022.* InstructGPT: the origin of system-prompt-driven instruction tuning and the RLHF training paradigm behind ChatGPT.
+- Lewis, P., Perez, E., Piktus, A., et al. (2020). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.](https://arxiv.org/abs/2005.11401) *NeurIPS 2020.* RAG: injecting retrieved documents into the context at inference time.
+- Fedus, W., Zoph, B., & Shazeer, N. (2022). [Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity.](https://arxiv.org/abs/2101.03961) *JMLR 2022.* An accessible MoE architecture; see also Shazeer et al. (2017) [Outrageously Large Neural Networks](https://arxiv.org/abs/1701.06538) for the original sparse MoE formulation, and Jiang et al. (2024) [Mixtral of Experts](https://arxiv.org/abs/2401.04088) for the openly-described system closest to what large production models are believed to use.
+- Leviathan, Y., Kalman, M., & Matias, Y. (2023). [Fast Inference from Transformers via Speculative Decoding.](https://arxiv.org/abs/2211.17192) *ICML 2023.* Speculative decoding: draft-model/verifier-model cooperative inference.
+
+---
+
+## Appendix: How RAG works — documents as context, not training data
+
+When you provide a document (a chip datasheet, a policy manual, a code file) and then ask a question about it, the inference pipeline concatenates them into one flat token sequence and feeds it to the model:
+
+```
+[... datasheet text ... pin 14: SDA, I²C data line ... pin 15: SCL ...][What is pin 14?]
+```
+
+There is no separate "document slot." To the model, that is one sequence of integer token ids, identical in form to any other input. The document and the question are both just tokens.
+
+### How the math answers the question
+
+When the model generates each answer token, causal [self-attention](#g-self-attention) runs over *all* preceding positions — both the datasheet tokens and the question tokens. The attention score that position $j$ (a question token) assigns to position $i$ (a document token) is:
+
+$$
+\text{score}_{ij} = \frac{q_j \cdot k_i}{\sqrt{d_h}}
+$$
+
+If the query vector $q_j$ produced by the question token "pin 14" has a high dot product with the key vector $k_i$ produced by the datasheet token "SDA", that position receives high attention weight. The value vector $v_i$ from that datasheet position then flows strongly into the output at position $j$, carrying its encoded information forward into the generation of the answer.
+
+The "retrieval" is not a discrete lookup — it is a **soft, weighted average over all positions in the context**, driven entirely by learned query–key affinities. No position is fetched discretely; all positions contribute, weighted by relevance.
+
+### What the trained weights actually encode
+
+The pinout information is **not** in the weights — it is in the context. What *is* in the weights is the model's learned ability to:
+
+1. Recognize that a token sequence pattern like *"What is pin 14?"* should produce query vectors that attend strongly to tokens near *"pin 14"* earlier in the sequence.
+2. Extract the relevant value content from those positions and propagate it forward through the residual stream.
+3. Decode the aggregated value vectors into plausible answer tokens via the output head.
+
+The weights encode *how to read* a document in context. The document itself carries the facts.
+
+### Where information lives
+
+| Source | Mechanism | Swappable at inference? |
+|---|---|---|
+| Model [weights](#g-parameter) | Compressed statistical patterns from training | No — frozen after training |
+| In-context document (RAG) | Actual tokens in the context window | Yes — swap the document, change the answers |
+| Conversation history | Prior turns concatenated into the same context | Yes — each turn extends the sequence |
+| System prompt | Prepended tokens, operator-controlled | Yes — per deployment |
+
+### Why this works (and when it doesn't)
+
+The model learned these attention patterns by training on text where questions and answers co-occurred in proximity — documentation, Q&A pairs, structured reference material. The mechanism generalizes to new documents at inference time because the attention computation is content-driven: it does not need to have seen *your specific chip* during training, only similar read-and-answer patterns.
+
+It fails or degrades when:
+
+- **The document exceeds the context window** — tokens that don't fit are simply never seen by the model. This is why production RAG systems chunk documents and retrieve only the most relevant chunks rather than dumping entire corpora into the context.
+- **Relevant information is scattered** — attention weights must span long distances and may diffuse across many positions, diluting the signal.
+- **Phrasing distance is too great** — if the question's vocabulary doesn't align well with the document's vocabulary, the learned query–key dot products may not produce high scores even for the correct positions.
+- **The fact requires multi-step reasoning** — a single forward pass may not reliably chain together several individually correct attention steps.
+
+### This project
+
+This model has no RAG machinery and no mechanism to incorporate external documents. The weights are the only knowledge store, and they encode nothing but patterns learned from TinyStories. The same transformer forward pass that a RAG system uses is happening here — but the context window contains only your `--prompt`, nothing else.
