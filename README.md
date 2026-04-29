@@ -111,16 +111,38 @@ python generate.py --prompt "Once upon a time there was a little girl who"
 
 ## Software structure
 
-Five Python files, each with a single responsibility:
+Four Python files, each with a single responsibility:
 
 ```mermaid
 flowchart LR
-  text[Raw TinyStories text] --> tok[GPT-2 BPE token ids]
-  tok --> emb[Token + position embeddings]
-  emb --> blocks[8 transformer blocks]
-  blocks --> logits[Logits over 50,257 tokens]
-  logits --> sample[Sample next token]
-  sample --> tok
+  subgraph dataDir[data/]
+    trainRaw[TinyStories-train.txt]
+    validRaw[TinyStories-valid.txt]
+    trainEotCache[tinystories-train-eot.pt]
+    validEotCache[tinystories-valid-eot.pt]
+  end
+
+  trainRaw --> dataset[dataset.py]
+  validRaw --> dataset
+  dataset --> trainEotCache
+  dataset --> validEotCache
+
+  trainEotCache --> train[train.py]
+  validEotCache --> train
+  model[model.py] --> train
+  train --> ckpt[checkpoint.pt]
+  train --> sample[Sample story printed to terminal]
+
+  prompt[User prompt text] --> generate[generate.py]
+  ckpt --> generate
+  model --> generate
+  generate --> output[Generated text]
+
+  req[requirements.txt] -. installs .-> deps[torch, tiktoken, and numpy]
+  deps -. used by .-> model
+  deps -. used by .-> dataset
+  deps -. used by .-> train
+  deps -. used by .-> generate
 ```
 
 ### `model.py` — the network
@@ -164,7 +186,7 @@ Loads a [checkpoint](#g-checkpoint), encodes a prompt, samples `--tokens` new to
 
 ### `requirements.txt`
 
-Just `torch>=2.0` and [`tiktoken`](#g-tiktoken).
+Just `torch>=2.0`, [`tiktoken`](#g-tiktoken), and `numpy`.
 
 ---
 
@@ -219,6 +241,34 @@ The math sections use standard notation from linear algebra and calculus. If any
 ---
 
 ## The math: training
+
+Training is the learning loop after `dataset.py` has already prepared cached token tensors: sample token chunks, run a forward pass, measure next-token prediction error, backpropagate gradients, and update the weights. Validation uses the same current weights, but it only measures generalization; it does not send gradients back into the model.
+
+```mermaid
+flowchart TD
+  trainCache[Cached training tokens] --> trainBatch[Sample training batch: x, y, doc_ids]
+  weights[Model weights]
+
+  trainBatch --> prep[Document-local positions and doc-aware causal mask]
+  weights --> trainForward[Forward pass in training mode]
+  prep --> trainForward
+  trainForward --> trainLogits[Next-token logits]
+  trainLogits --> trainLoss[Cross-entropy vs training targets]
+  trainLoss --> backward[Backpropagation computes gradients]
+  backward --> clip[Gradient clipping]
+  clip --> adamw[AdamW optimizer step]
+  adamw --> weights
+
+  validCache[Cached validation tokens] --> validBatch[Validation batches]
+  weights --> validForward[Forward pass in eval mode]
+  validBatch --> validForward
+  validForward --> validLogits[Next-token logits]
+  validLogits --> validLoss[Cross-entropy vs validation targets]
+  validLoss --> monitor[Monitor validation loss and train/val gap]
+  monitor --> decision{Continue training?}
+  decision -- yes --> trainBatch
+  decision -- no --> ckpt[Save checkpoint.pt]
+```
 
 ### Tokenization
 
@@ -407,6 +457,25 @@ The [warmup](#g-warmup) avoids early instability while the $\beta_1, \beta_2$ ([
 ---
 
 ## The math: inference
+
+Inference is the generation loop: encode a prompt, run the trained model without weight updates, sample one token, append it, and repeat.
+
+```mermaid
+flowchart TD
+  prompt[Prompt text] --> encode[GPT-2 BPE encode]
+  encode --> context[Token context idx]
+  context --> crop[Crop to 256-token context window]
+  crop --> forward[GPT forward pass in eval mode]
+  forward --> last[Take last-position logits]
+  last --> temp[Apply temperature]
+  temp --> topk[Apply top-k filtering]
+  topk --> probs[Softmax probabilities]
+  probs --> sample[Categorical sample next token]
+  sample --> append[Append token to context]
+  append --> stop{Stop?}
+  stop -- no --> crop
+  stop -- yes --> decode[Decode token ids to text]
+```
 
 ### The sampling loop
 
