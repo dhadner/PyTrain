@@ -2,6 +2,33 @@
 
 This project builds a small version of the AI that powers ChatGPT — from scratch, in about 350 lines of Python.
 
+What it produces:
+
+```console
+% python generate.py --prompt "Once upon a time there was a little boy named Sam"
+Model parameters: 51,082,752
+Once upon a time there was a little boy named Sam. He was three years old
+and loved to play outside.
+
+One day, Sam decided to play in the garden. He saw a butterfly and chased
+after it. The butterfly flew away, but Sam kept chasing it. He ran around
+the garden, and it was so much fun.
+
+Suddenly, he heard an angry voice. "Hey Sam!" it said. Sam looked around
+and saw an old man. The old man was shouting. "Hey! That looks like a
+foolish day!"
+
+Sam was so scared. He started to run away, but the old man caught him. He
+said, "That's not a good dream. You are supposed to stay in the garden."
+
+Sam felt sad. He knew he should have listened to the old man, so he stayed
+in the garden. Now he could play with his toys and enjoy the sun.
+
+Sam knew he should have listened to the old man. He learned a valuable
+lesson that day. He promised himself to stay in the garden and not run away
+again.
+```
+
 A from-scratch GPT-style language model in [PyTorch](#g-pytorch), sized to train on a single Apple Silicon Mac in under an hour. ([**GPT**](#g-gpt) = Generative Pre-trained Transformer: a [decoder-only](#g-decoder-only) [Transformer](#g-transformer) that generates text *[autoregressively](#g-autoregressive)* — one [token](#g-token) at a time, each conditioned on what came before.) The configured model is 51M [parameters](#g-parameter), trained on the TinyStories corpus (~470M tokens), reaching [validation](#g-validation) *[perplexity](#g-perplexity)* ≈ 3.8 ([perplexity](#g-perplexity) is the exponential of [cross-entropy](#g-cross-entropy), $e^{\text{cross-entropy}}$, roughly "the effective number of equally-likely guesses the model is averaging over for each token" — lower is better).
 
 The point of this repository isn't to compete with production language models — it's to make every part of a GPT *legible*. No trainer frameworks, no high-level model libraries, no hidden abstractions: just [PyTorch](#g-pytorch) tensors and modules. The core model is about 120 lines, and the full project is about 350 lines of Python total. The main equations you'll read below map directly to the code.
