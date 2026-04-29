@@ -16,7 +16,7 @@ At the highest level, every language model — from this tiny project to GPT-4 �
 
 **Inference** is the generation phase. Once training is finished, the parameters are frozen — no more learning. You feed the model a prompt and it predicts one token at a time, appending each predicted token to the input and repeating until it decides to stop (or you cut it off). Compared to training, inference is far less demanding: there is only one forward pass per token (no gradient computation, no optimizer), and the model only needs to fit in memory once rather than keep gradients and optimizer state around too. That is why ChatGPT can run a response on a handful of GPUs per query, and why on-device models can run on a phone or laptop — though inference still requires meaningful processing power, especially as context length grows.
 
-*A note on modern production LLMs.* What actually gets fed to the model at inference time isn't just the user's message. The inference pipeline assembles a single token sequence from multiple sources: operator-written system instructions (defining the model's persona and constraints), prior conversation turns, and sometimes documents retrieved on-the-fly from an external store (a technique called *retrieval-augmented generation*, or RAG). The model itself is unaware of these boundaries — it simply predicts the next token given whatever token sequence it receives, regardless of where each segment came from. In a typical ChatGPT exchange, the user's actual message may be a small fraction of the tokens the model processes. This project has none of that machinery: the context window is exactly and only what you pass to `--prompt`, the model has no persistent memory between calls to `generate.py`, and any "personality" in the output comes entirely from patterns in the TinyStories training corpus, not from instructions injected at runtime. For the specific question of context assembly, the underlying math is identical — both this model and a system like ChatGPT run the same transformer forward pass on a flat token sequence, and the model is unaware of how that sequence was assembled. The difference lies entirely in the pipeline that constructs the input.
+*A note on modern production LLMs.* What actually gets fed to the model at inference time isn't just the user's message. The inference pipeline assembles a single token sequence from multiple sources: operator-written system instructions (defining the model's persona and constraints), prior conversation turns, and sometimes documents retrieved on-the-fly from an external store (a technique called *retrieval-augmented generation*, or [RAG](#g-rag)). The model itself is unaware of these boundaries — it simply predicts the next token given whatever token sequence it receives, regardless of where each segment came from. In a typical ChatGPT exchange, the user's actual message may be a small fraction of the tokens the model processes. This project has none of that machinery: the context window is exactly and only what you pass to `--prompt`, the model has no persistent memory between calls to `generate.py`, and any "personality" in the output comes entirely from patterns in the TinyStories training corpus, not from instructions injected at runtime. For the specific question of context assembly, the underlying math is identical — both this model and a system like ChatGPT run the same transformer forward pass on a flat token sequence, and the model is unaware of how that sequence was assembled. The difference lies entirely in the pipeline that constructs the input.
 
 That said, many production systems also differ from this model *architecturally* in ways context assembly alone does not explain. Most notably, large models are widely believed to use *Mixture-of-Experts* (MoE): rather than a single shared MLP in each transformer block, a learned router dispatches each token to a small subset of parallel "expert" feed-forward networks, keeping computation sub-linear in the total number of parameters. Separately, many deployments use *speculative decoding* at inference time, where a small fast draft model proposes candidate tokens and a larger verifier model accepts or rejects them in parallel — two models cooperating rather than one running serially. Neither technique changes the transformer's fundamental input-output contract (token sequence in, logit distribution out), but both go well beyond what a single-network model like this one captures. See [References](#references) below for pointers to some of these.
 
@@ -79,7 +79,7 @@ Three classes:
 
 - **`CausalSelfAttention`** — The attention layer. In plain terms: for every token, it looks at all earlier tokens and decides how much to borrow from each one, then blends their information into the current token's vector. Technically: *[self-attention](#g-self-attention)* computes a weighted sum of every position's value vectors, with the weights determined by how well each query matches each key. *[Multi-head](#g-multihead)* runs $H = 8$ independent self-attentions in parallel, each on a slice of the $d = 512$ [embedding](#g-embedding) dimension, letting different [attention heads](#g-attention-head) specialize to different relationships. *[Causal masking](#g-causal-masking)* prevents each position from attending to *future* positions — without it, the model could look up the very token it's supposed to predict. A single `Linear(d, 3d)` [projects](#g-projection) input into queries, keys, and values; the result is reshaped to `[B, H, T, d_h]` and passed to `F.scaled_dot_product_attention`. Supports two modes: standard causal masking (used at [inference](#g-inference)) and explicit *[document-aware masking](#g-doc-masking)*, which also prevents attention from crossing `<|endoftext|>` boundaries when multiple stories are packed into one training chunk.
 
-- **`Block`** — One repeating unit of the network, stacked $L = 8$ times. Think of it as one "round of processing": look at context (attention), then think about it (MLP), then pass the result to the next block. More precisely: each block applies [self-attention](#g-self-attention) followed by a feed-forward *[MLP](#g-mlp)* (two `Linear` layers with a non-linearity between). Both sub-layers are wrapped with a *[residual](#g-residual)* connection — the block's input is added back to its output, giving [gradients](#g-gradient) a shortcut path that makes deep stacks trainable. *[LayerNorm](#g-layernorm)* (channel-wise normalization) is applied *before* each sub-layer ([pre-norm](#g-prenorm)) — more stable than applying it after: `x = x + Attn(LN(x))` then `x = x + MLP(LN(x))`. The MLP uses the standard `d → 4d → d` expansion with *[GELU](#g-gelu)* activation.
+- **`Block`** — One repeating unit of the network, stacked $L = 8$ times. Think of it as one "round of processing": look at context (attention), then think about it (MLP), then pass the result to the next block. More precisely: each block applies [self-attention](#g-self-attention) followed by a feed-forward *[MLP](#g-mlp)* (two `Linear` layers with a [non-linearity](#g-nonlinearity) between). Both sub-layers are wrapped with a *[residual](#g-residual)* connection — the block's input is added back to its output, giving [gradients](#g-gradient) a shortcut path that makes deep stacks trainable. *[LayerNorm](#g-layernorm)* (channel-wise normalization) is applied *before* each sub-layer ([pre-norm](#g-prenorm)) — more stable than applying it after: `x = x + Attn(LN(x))` then `x = x + MLP(LN(x))`. The MLP uses the standard `d → 4d → d` expansion with *[GELU](#g-gelu)* [activation function](#g-activation-function).
 
 - **`GPT`** — the full stack. Token [embedding](#g-embedding) + position [embedding](#g-embedding) → `n_layer` blocks → final [LayerNorm](#g-layernorm) → [output head](#g-output-head). The [output head](#g-output-head) weight is *[weight-tied](#g-weight-tying)* with the token embedding (same matrix used to embed inputs and [project](#g-projection) outputs), which roughly halves embedding [parameters](#g-parameter) and improves [perplexity](#g-perplexity).
 
@@ -289,7 +289,7 @@ $$
 \mathrm{MLP}(x) = W_2 \, \mathrm{GELU}(W_1 x)
 $$
 
-The 4x expansion is GPT-2/3 convention; the 4x intermediate dimension gives the network capacity to compute non-linear features that the linear attention can't.
+The 4x expansion is GPT-2/3 convention; the 4x intermediate dimension gives the network capacity to compute [non-linear](#g-nonlinear) features that the [linear](#g-linear) attention can't.
 
 ### The full model
 
@@ -419,7 +419,11 @@ Each iteration is a full forward pass (no [KV-cache](#g-kvcache) in this impleme
 
 ## Glossary
 
-[A](#g-adamw) · [B](#g-batch) · [C](#g-causal-masking) · [D](#g-decoder-only) · [E](#g-embedding) · [G](#g-gelu) · [H](#g-hyperparameter) · [I](#g-inference) · [K](#g-kvcache) · [L](#g-layer) · [M](#g-matmul) · [O](#g-output-head) · [P](#g-parameter) · [R](#g-recurrence) · [S](#g-self-attention) · [T](#g-temperature) · [V](#g-vocabulary) · [W](#g-warmup)
+[A](#gl-a) · [B](#gl-b) · [C](#gl-c) · [D](#gl-d) · [E](#gl-e) · [G](#gl-g) · [H](#gl-h) · [I](#gl-i) · [K](#gl-k) · [L](#gl-l) · [M](#gl-m) · [N](#gl-n) · [O](#gl-o) · [P](#gl-p) · [R](#gl-r) · [S](#gl-s) · [T](#gl-t) · [V](#gl-v) · [W](#gl-w)
+
+<a id="gl-a"></a>
+
+<a id="g-activation-function"></a>**Activation function** — A [non-linear](#g-nonlinear) function applied element-wise to the output of a [linear](#g-linear) layer. Its sole purpose is to break linearity: without it, stacking any number of linear layers is mathematically equivalent to a single linear layer, so the network can only model linear relationships. Common choices include [ReLU](#g-relu) ($\max(0, x)$, simple but has a sharp corner at zero) and [GELU](#g-gelu) (a smooth, differentiable curve that works better in transformers). The activation function is sometimes also called a *[non-linearity](#g-nonlinearity)*.
 
 <a id="g-adamw"></a>**AdamW** — A variant of the [Adam optimizer](https://arxiv.org/pdf/1412.6980) that separates weight-decay regularization from the gradient update, preventing the adaptive [learning rate](#g-learning-rate) from inadvertently reducing the effect of regularization. Standard choice for transformer training.
 
@@ -433,11 +437,15 @@ Each iteration is a full forward pass (no [KV-cache](#g-kvcache) in this impleme
 
 <a id="g-autoregressive"></a>**Autoregressive** — A generation strategy where each new token is produced one at a time, conditioned on all previously generated tokens. The model loops, appending each output as the next input.
 
+<a id="gl-b"></a>
+
 <a id="g-backprop"></a>**Backpropagation** — The algorithm used to compute [gradients](#g-gradient) in a neural network. It applies the chain rule of calculus from the loss backwards through every layer to determine how much each [parameter](#g-parameter) contributed to the error.
 
 <a id="g-batch"></a>**Batch** — A group of training examples (here: token sequences) processed together in one forward pass. Batching allows GPUs to work in parallel, making training far more efficient than processing one example at a time.
 
 <a id="g-bpe"></a>**BPE (Byte-Pair Encoding)** — A subword tokenization algorithm. It starts with individual characters and iteratively merges the most frequent adjacent pair into a single token, building up a [vocabulary](#g-vocabulary) of common substrings. Rare words are split into shorter pieces; common words get their own token.
+
+<a id="gl-c"></a>
 
 <a id="g-causal-masking"></a>**Causal masking** — A technique that prevents each token position from attending to any position that comes after it in the same sequence. To understand why this is necessary, it helps to understand how a single training example is structured.
 
@@ -455,7 +463,11 @@ Each iteration is a full forward pass (no [KV-cache](#g-kvcache) in this impleme
 
 <a id="g-cross-entropy"></a>**Cross-entropy** — The standard loss function for classification tasks: $-\log p(\text{correct answer})$ (where $\log$ is the natural logarithm — see the [notation guide](#how-to-read-the-equations)). It heavily penalizes the model when it assigns low probability to the right answer, and barely penalizes it when it is confident and correct.
 
+<a id="gl-d"></a>
+
 <a id="g-decoder-only"></a>**Decoder-only** — A transformer that has only the decoder stack from the original encoder–decoder architecture. The original 2017 Transformer was designed for sequence-to-sequence tasks like translation: an *encoder* reads the full source sentence at once (every token can *attend to* every other token — meaning its output vector is computed as a weighted mix of information from all positions, with no causal mask), and a *decoder* generates the target sentence one token at a time, attending both to its own previous outputs and to the encoder's output. GPT drops the encoder entirely and keeps only the decoder. Without an encoder to attend to, each token can only attend to its own previous tokens (enforced by [causal masking](#g-causal-masking)). This makes the model well-suited for open-ended text generation — predicting the next token from whatever came before — but not for tasks that require encoding a separate input sequence.
+
+<a id="g-differentiable"></a>**Differentiable** — A function is differentiable if a small change in its inputs produces a proportionally small, smooth change in its output — meaning a well-defined derivative exists at every point. In deep learning this property is essential: [backpropagation](#g-backprop) works by tracing the loss backward through every operation in the network and computing the [gradient](#g-gradient) of the loss with respect to each [parameter](#g-parameter). That chain of derivatives only exists if every operation in the chain is differentiable. Operations like matrix multiplication, addition, and [GELU](#g-gelu) are differentiable; a hard threshold (outputting exactly 0 or 1) is not, because its derivative is zero almost everywhere and undefined at the jump.
 
 <a id="g-doc-masking"></a>**Document-aware masking** — A general training technique used whenever multiple independent documents are packed end-to-end into one sequence for efficiency. While [causal masking](#g-causal-masking) blocks contamination from *future* positions in the current token chunk — positions the model is simultaneously being asked to predict, so seeing them would be cheating — document-aware masking additionally blocks contamination from any position belonging to a *different* document, preventing the model from forming spurious connections across document boundaries. In this project the "documents" are TinyStories stories, separated by `<|endoftext|>` tokens — a dataset-specific detail, but the masking technique itself applies to any packed-document training setup.
 
@@ -472,11 +484,15 @@ Each iteration is a full forward pass (no [KV-cache](#g-kvcache) in this impleme
 >
 > The attention weight that position $i$ assigns to position $j$ is proportional to $\exp\!\bigl(q_i \cdot k_j / \sqrt{d_h} + M_{ij}\bigr)$. When $M_{ij} = -\infty$, the numerator is $\exp(-\infty) = 0$ exactly — not approximately zero, but hard zero — regardless of the content of $q_i$ or $k_j$. Position $j$'s value vector contributes nothing to position $i$'s output, and no [gradient](#g-gradient) flows across the boundary. The `<|endoftext|>` token's only role is to give the data pipeline a unique id to scan for when building `doc_ids`; any reserved sentinel id would work equally well.
 
+<a id="gl-e"></a>
+
 <a id="g-embedding"></a>**Embedding** — A learned lookup table that maps a discrete integer id (a token or a position) to a dense vector of real numbers. The vectors are learned by [gradient](#g-gradient) descent and encode semantic and structural information about the token.
 
 <a id="g-ema"></a>**Exponential moving average (EMA)** — A running average where more recent values are weighted more heavily than older ones. Used in the [AdamW](#g-adamw) optimizer to track the mean and variance of [gradients](#g-gradient) over time, providing a smoother estimate than a single-step snapshot.
 
-<a id="g-gelu"></a>**GELU (Gaussian Error Linear Unit)** — A smooth activation function used in the [MLP](#g-mlp) layers of the [Transformer](#g-transformer). Similar to [ReLU](#g-relu) (which clips negative values to 0) but with a smooth curve rather than a sharp corner, which tends to improve training dynamics.
+<a id="gl-g"></a>
+
+<a id="g-gelu"></a>**GELU (Gaussian Error Linear Unit)** — A smooth [activation function](#g-activation-function) used in the [MLP](#g-mlp) layers of the [Transformer](#g-transformer). Similar to [ReLU](#g-relu) (which clips negative values to 0) but with a smooth curve rather than a sharp corner, which tends to improve training dynamics.
 
 <a id="g-gpt"></a>**GPT (Generative Pre-trained Transformer)** — A class of language model using a [decoder-only](#g-decoder-only) [Transformer](#g-transformer) architecture trained to predict the next token. "Pre-trained" refers to training on a large text corpus before any task-specific fine-tuning.
 
@@ -484,29 +500,53 @@ Each iteration is a full forward pass (no [KV-cache](#g-kvcache) in this impleme
 
 <a id="g-gradient-clipping"></a>**Gradient clipping** — Scaling down the gradient if its total magnitude exceeds a threshold (here: 1.0) before applying an optimizer step. Prevents a single unusually large gradient from destabilizing training.
 
+<a id="gl-h"></a>
+
 <a id="g-hyperparameter"></a>**Hyperparameter** — A value set before training begins that controls the training process or model architecture (e.g., [learning rate](#g-learning-rate), [batch](#g-batch) size, number of [layers](#g-layer)). Distinct from *[parameters](#g-parameter)*, which are the weights learned during training.
+
+<a id="gl-i"></a>
 
 <a id="g-inference"></a>**Inference** — Running a trained model to produce output (here: generating text from a prompt), as opposed to *training*, which updates the model's weights.
 
+<a id="gl-k"></a>
+
 <a id="g-kvcache"></a>**KV-cache** — An optimization for [inference](#g-inference) that avoids redundant computation during [autoregressive](#g-autoregressive) generation. During generation, at each step the model needs to run [self-attention](#g-self-attention) over the entire token sequence seen so far — which means computing a key vector and a value vector for every previous token, again, even though those tokens haven't changed. A KV-cache saves those key and value vectors after they are first computed; on the next step they are read from memory rather than recomputed. The cache grows by one row per step as each new token is appended. The saving becomes significant as the sequence grows long: without the cache, each step costs $O(T^2)$ in both computation and redundant work; with the cache it costs $O(T)$ per step. Not implemented in this project (each step does a full forward pass).
 
-<a id="g-layer"></a>**Layer** — One processing stage inside a neural network. Each layer takes a [tensor](#g-tensor) as input, applies a mathematical transformation (such as a linear [projection](#g-projection), [attention](#g-attention), or normalization), and passes the result to the next layer. "Depth" refers to how many layers are stacked: early layers tend to capture low-level patterns, while later layers build on those to capture higher-level structure. In this model there are 8 [transformer blocks](#g-transformer) stacked in sequence, each of which contains two sub-layers: a [self-attention](#g-self-attention) layer and an [MLP](#g-mlp) layer.
+<a id="gl-l"></a>
+
+<a id="g-layer"></a>**Layer** — One processing stage inside a neural network. Each layer takes a [tensor](#g-tensor) as input, applies a mathematical transformation (such as a [linear](#g-linear) [projection](#g-projection), [attention](#g-attention), or normalization), and passes the result to the next layer. "Depth" refers to how many layers are stacked: early layers tend to capture low-level patterns, while later layers build on those to capture higher-level structure. In this model there are 8 [transformer blocks](#g-transformer) stacked in sequence, each of which contains two sub-layers: a [self-attention](#g-self-attention) layer and an [MLP](#g-mlp) layer.
 
 <a id="g-layernorm"></a>**LayerNorm (Layer Normalization)** — A normalization operation applied to the activations within each token's vector: subtracts the mean and divides by the standard deviation across the channel dimension, then applies a learned scale and shift. Keeps activations from growing too large or too small as they pass through many layers.
 
 <a id="g-learning-rate"></a>**Learning rate** — The multiplier that controls how large a step the optimizer takes in the direction of the [gradient](#g-gradient) on each update. Too high and training is unstable; too low and training is slow.
 
+<a id="g-linear"></a>**Linear transformation** — A function of the form $y = Wx + b$: multiply an input vector $x$ by a weight matrix $W$ (optionally adding a bias vector $b$). It is called "linear" because it obeys two rules — doubling the input doubles the output, and the output for a sum of inputs equals the sum of the outputs. The practical consequence is that composing any number of linear transformations is still equivalent to a single linear transformation. This means a network made entirely of linear layers, however deep, can only learn linear relationships in data — no more than a single matrix multiply could capture. That is why [non-linearities](#g-nonlinearity) are inserted between linear layers. In PyTorch, `nn.Linear(in, out)` implements $y = xW^\top + b$; the weight matrix $W$ and bias $b$ are learnable [parameters](#g-parameter).
+
 <a id="g-logits"></a>**Logits** — The raw, unnormalized output scores produced by the [output head](#g-output-head). The output head is a single matrix multiply applied position-wise across every position of the *input* sequence simultaneously, so the output inherits exactly $T$ positions from the input — the model does not choose how many positions to produce. At each input position $t$, the model produces $V$ scores — one per [vocabulary](#g-vocabulary) token — representing its prediction for *what token comes next* (i.e., the token at position $t+1$). The full [tensor](#g-tensor) has shape $[B, T, V]$: $B$ sequences, $T$ positions each, $V$ scores per position. During training the loss is computed over all $B \times T$ next-token predictions at once. During [inference](#g-inference), only the last position's $V$ scores ($\ell[:, -1, :]$, shape $[1, V]$) are used to sample the next token, since that is the only position predicting something not yet in the context. [Softmax](#g-softmax) converts a logit vector into a probability distribution. The term comes from *log-odds* in statistics.
+
+<a id="gl-m"></a>
 
 <a id="g-matmul"></a>**Matmul (matrix multiplication)** — The core arithmetic operation in neural networks: multiplying two matrices together. In transformers, most computation reduces to matmuls, which GPUs are highly optimized for.
 
-<a id="g-mlp"></a>**MLP (Multi-Layer Perceptron)** — A feed-forward sub-network within each [transformer block](#g-transformer) consisting of two linear layers with a non-linear activation between them. Applies a per-token transformation to introduce non-linearity that [self-attention](#g-self-attention) alone cannot provide.
+<a id="g-mlp"></a>**MLP (Multi-Layer Perceptron)** — A feed-forward sub-network within each [transformer block](#g-transformer) consisting of two [linear](#g-linear) layers with a [non-linear](#g-nonlinearity) [activation function](#g-activation-function) between them. Applies a per-token transformation to introduce [non-linearity](#g-nonlinearity) that [self-attention](#g-self-attention) alone cannot provide.
 
 <a id="g-momentum"></a>**Momentum coefficients** ($\beta_1$, $\beta_2$) — The two [hyperparameters](#g-hyperparameter) in the [AdamW](#g-adamw) optimizer that control how slowly its running estimates of [gradient](#g-gradient) mean ($m_t$) and gradient variance ($v_t$) respond to new information. $\beta_1 = 0.9$ means the mean estimate retains 90% of its previous value each step and incorporates 10% of the new [gradient](#g-gradient) — so it tracks a slowly-updating smoothed direction. $\beta_2 = 0.999$ does the same for the variance estimate but responds even more slowly, averaging gradient magnitudes over roughly 1000 steps. Before these averages have seen enough data to be reliable, the step sizes they imply can be unreliable — this is the instability that [warmup](#g-warmup) is designed to avoid.
 
 <a id="g-multihead"></a>**Multi-head attention** — Running several [self-attention](#g-self-attention) operations in parallel, each on a different learned [projection](#g-projection) (an "[attention head](#g-attention-head)") of the input. Different [attention heads](#g-attention-head) can specialize to attend to different kinds of relationships in the sequence. Results are concatenated and [projected](#g-projection) back to the original dimension.
 
-<a id="g-output-head"></a>**Output head** — The final linear layer of the model that converts each token's $d$-dimensional vector into a score for every [vocabulary](#g-vocabulary) token. Concretely it is a `Linear(d, vocab_size, bias=False)` layer — a matrix multiply $X \cdot W^\top$ where $W \in \mathbb{R}^{V \times d}$. The result (shape $[B, T, V]$) is the [logits](#g-logits) tensor. In this model the output head is [weight-tied](#g-weight-tying) with the token [embedding](#g-embedding), so no extra [parameters](#g-parameter) are needed. *See also: [Attention head](#g-attention-head) — a different use of "head", referring to a parallel self-attention instance inside the model rather than the final [projection](#g-projection) layer.*
+<a id="gl-n"></a>
+
+<a id="g-neural-network"></a>**Neural network** — A computational model loosely inspired by biological brains, consisting of layers of simple mathematical operations ([linear](#g-linear) transformations followed by [non-linearities](#g-nonlinearity)) stacked in sequence. Each layer takes a tensor of numbers as input and produces a tensor as output; the layers are composed so that the output of one feeds the input of the next. "Learning" means adjusting the network's parameters (the weight matrices in those linear transformations) by [gradient](#g-gradient) descent until the network's outputs match the desired targets on a training set. The term covers a wide family of architectures — [convolutional networks](#g-convolution), [recurrent networks](#g-recurrence), [transformers](#g-transformer), and many others — all sharing this basic structure of [parameterized](#g-parameter), [differentiable](#g-differentiable) operations trained end-to-end with [backpropagation](#g-backprop). This project is a specific instance: an 8-layer [decoder-only](#g-decoder-only) [transformer](#g-transformer) neural network trained for next-token prediction.
+
+<a id="g-nonlinear"></a>**Non-linear** — Describing any relationship, function, or transformation that does not obey the two rules of [linearity](#g-linear): doubling the input does not necessarily double the output, and the output of a sum of inputs is not necessarily the sum of the individual outputs. In practice this means the relationship can curve, saturate, threshold, or behave differently at different scales. A [neural network](#g-neural-network) trained only with [linear](#g-linear) operations can only fit linear relationships in data — a severe limitation. The deep learning solution is to alternate linear operations with [non-linearities](#g-nonlinearity) ([activation functions](#g-activation-function)), so the composed function is non-linear overall and can approximate far more complex patterns.
+
+<a id="g-nonlinearity"></a>**Non-linearity ([activation function](#g-activation-function))** — A function applied element-wise after a [linear](#g-linear) transformation to introduce curvature that a purely linear stack cannot represent. Without non-linearities, any number of stacked [linear](#g-linear) layers collapse mathematically into a single [linear](#g-linear) transformation, so the network could only fit linear relationships in data. Inserting a non-linearity after each linear layer breaks that collapse: the composition is no longer reducible to one matrix multiply, and the network gains the ability to approximate arbitrarily complex functions. Common choices are [ReLU](#g-relu) (replaces negative values with zero) and [GELU](#g-gelu) (a smooth, differentiable variant). In this model every [MLP](#g-mlp) block uses GELU as its non-linearity.
+
+<a id="gl-o"></a>
+
+<a id="g-output-head"></a>**Output head** — The final [linear](#g-linear) layer of the model that converts each token's $d$-dimensional vector into a score for every [vocabulary](#g-vocabulary) token. Concretely it is a `Linear(d, vocab_size, bias=False)` layer — a matrix multiply $X \cdot W^\top$ where $W \in \mathbb{R}^{V \times d}$. The result (shape $[B, T, V]$) is the [logits](#g-logits) tensor. In this model the output head is [weight-tied](#g-weight-tying) with the token [embedding](#g-embedding), so no extra [parameters](#g-parameter) are needed. *See also: [Attention head](#g-attention-head) — a different use of "head", referring to a parallel self-attention instance inside the model rather than the final [projection](#g-projection) layer.*
+
+<a id="gl-p"></a>
 
 <a id="g-parameter"></a>**Parameter** — A single learnable weight in the model. Training adjusts all parameters to minimize the *loss* — a scalar number measuring how wrong the model's predictions are on the current batch; here, the [cross-entropy](#g-cross-entropy) averaged over all positions. This model has 51,082,752 parameters (~51.1M), accounted for as follows (using $d = 512$, $V = 50257$, $T_{\max} = 256$, 8 blocks, 8 [attention heads](#g-attention-head) of size 64):
 
@@ -543,15 +583,23 @@ The token embedding alone accounts for just over half the parameters (25.7M out 
 >
 > "Project" used as a verb simply means "apply a linear projection". Every projection is a learned weight matrix — initialized randomly and updated by [gradient](#g-gradient) descent.
 
+<a id="gl-r"></a>
+
+<a id="g-rag"></a>**RAG (Retrieval-Augmented Generation)** — A inference-time technique in which relevant documents are retrieved from an external store and prepended to the user's query before the combined token sequence is fed to the model. The model is not retrained; the retrieved text simply occupies part of the context window alongside the prompt. Because [self-attention](#g-self-attention) operates uniformly over all positions in the sequence, the model can attend to the retrieved content in exactly the same way it attends to any other token — no architectural change is required. The "retrieval" step (deciding *which* chunks of text to fetch) is typically handled by a separate embedding-similarity search outside the model itself. See the [Appendix](#appendix-how-rag-works--documents-as-context-not-training-data) for a detailed walkthrough of how the attention math resolves a query against an in-context document.
+
 <a id="g-recurrence"></a>**Recurrence (recurrent network, RNN)** — A neural network design where the model processes a sequence one token at a time, carrying a hidden state forward from each step to the next. The hidden state acts as a compressed memory of everything seen so far. The problem is that this memory is a fixed-size vector: information from early in a long sequence tends to get overwritten by the time the model reaches the end. Transformers replaced recurrence for most language tasks by using [self-attention](#g-self-attention), which can directly access any earlier position without first funnelling the entire history into a single fixed-size vector (the "running state") that must simultaneously represent everything the model might ever need to remember.
 
-<a id="g-relu"></a>**ReLU (Rectified Linear Unit)** — An activation function that outputs the input directly if positive, and zero otherwise: $\mathrm{ReLU}(x) = \max(0, x)$. Simple and widely used, but has a sharp corner at zero. [GELU](#g-gelu) is a smoother variant that tends to work better in transformers.
+<a id="g-relu"></a>**ReLU (Rectified Linear Unit)** — An [activation function](#g-activation-function) that outputs the input directly if positive, and zero otherwise: $\mathrm{ReLU}(x) = \max(0, x)$. Simple and widely used, but has a sharp corner at zero. [GELU](#g-gelu) is a smoother variant that tends to work better in transformers.
 
 <a id="g-residual"></a>**Residual connection** — Adding the input of a sub-layer directly to its output: `x = x + SubLayer(x)`. Provides a shortcut path for [gradients](#g-gradient) to flow through during [backpropagation](#g-backprop), making it much easier to train deep networks.
+
+<a id="gl-s"></a>
 
 <a id="g-self-attention"></a>**Self-attention** — An operation in which every token in a sequence computes a weighted sum of all other tokens' values, with the weights determined by the content of the tokens themselves (via dot products of queries and keys). Allows the model to relate any token to any other token in the sequence. Self-attention is the central innovation of the [Transformer](#g-transformer) architecture, introduced in ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017).
 
 <a id="g-softmax"></a>**Softmax** — A function that converts a vector of arbitrary real numbers into a probability distribution (all values between 0 and 1, summing to 1): $\mathrm{softmax}(\ell)_i = e^{\ell_i} / \sum_j e^{\ell_j}$. Used in attention (to get per-position weights) and at the output layer (to get per-token probabilities).
+
+<a id="gl-t"></a>
 
 <a id="g-temperature"></a>**Temperature** — A scalar $\tau$ by which [logits](#g-logits) are divided before [softmax](#g-softmax) during [inference](#g-inference). $\tau < 1$ makes the distribution sharper (higher-probability tokens become even more dominant); $\tau > 1$ flattens it (lower-probability tokens get a larger relative share), producing more varied but less coherent text.
 
@@ -569,7 +617,11 @@ Integers are used at this stage because a token id is a *lookup key*, not a numb
 
 <a id="g-transformer"></a>**Transformer** — A neural network architecture based on [self-attention](#g-self-attention), introduced in the landmark 2017 paper ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) by Vaswani et al. The core claim of the paper was that attention alone — without [recurrence](#g-recurrence) or [convolution](#g-convolution) — is sufficient to achieve state-of-the-art results on language tasks. GPT uses the [decoder-only](#g-decoder-only) variant: a stack of transformer blocks that each apply [self-attention](#g-self-attention) followed by an [MLP](#g-mlp).
 
+<a id="gl-v"></a>
+
 <a id="g-vocabulary"></a>**Vocabulary** — The fixed set of token ids the model can produce as output. For GPT-2 [BPE](#g-bpe) the vocabulary size is $V = 50{,}257$.
+
+<a id="gl-w"></a>
 
 <a id="g-warmup"></a>**Warmup** — A training technique where the [learning rate](#g-learning-rate) starts near zero and ramps up linearly over the first few hundred steps. Allows the optimizer's running statistics (means and variances of [gradients](#g-gradient)) to stabilize before large [gradient](#g-gradient) steps are taken.
 
@@ -601,7 +653,7 @@ Key papers behind the techniques and claims in this README.
 **Production system context**
 
 - Ouyang, L., Wu, J., Jiang, X., et al. (2022). [Training language models to follow instructions with human feedback.](https://arxiv.org/abs/2203.02155) *NeurIPS 2022.* InstructGPT: the origin of system-prompt-driven instruction tuning and the RLHF training paradigm behind ChatGPT.
-- Lewis, P., Perez, E., Piktus, A., et al. (2020). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.](https://arxiv.org/abs/2005.11401) *NeurIPS 2020.* RAG: injecting retrieved documents into the context at inference time.
+- Lewis, P., Perez, E., Piktus, A., et al. (2020). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.](https://arxiv.org/abs/2005.11401) *NeurIPS 2020.* [RAG](#g-rag): injecting retrieved documents into the context at inference time.
 - Fedus, W., Zoph, B., & Shazeer, N. (2022). [Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity.](https://arxiv.org/abs/2101.03961) *JMLR 2022.* An accessible MoE architecture; see also Shazeer et al. (2017) [Outrageously Large Neural Networks](https://arxiv.org/abs/1701.06538) for the original sparse MoE formulation, and Jiang et al. (2024) [Mixtral of Experts](https://arxiv.org/abs/2401.04088) for the openly-described system closest to what large production models are believed to use.
 - Leviathan, Y., Kalman, M., & Matias, Y. (2023). [Fast Inference from Transformers via Speculative Decoding.](https://arxiv.org/abs/2211.17192) *ICML 2023.* Speculative decoding: draft-model/verifier-model cooperative inference.
 
@@ -644,7 +696,7 @@ The weights encode *how to read* a document in context. The document itself carr
 | Source | Mechanism | Swappable at inference? |
 |---|---|---|
 | Model [weights](#g-parameter) | Compressed statistical patterns from training | No — frozen after training |
-| In-context document (RAG) | Actual tokens in the context window | Yes — swap the document, change the answers |
+| In-context document ([RAG](#g-rag)) | Actual tokens in the context window | Yes — swap the document, change the answers |
 | Conversation history | Prior turns concatenated into the same context | Yes — each turn extends the sequence |
 | System prompt | Prepended tokens, operator-controlled | Yes — per deployment |
 
@@ -654,11 +706,11 @@ The model learned these attention patterns by training on text where questions a
 
 It fails or degrades when:
 
-- **The document exceeds the context window** — tokens that don't fit are simply never seen by the model. This is why production RAG systems chunk documents and retrieve only the most relevant chunks rather than dumping entire corpora into the context.
+- **The document exceeds the context window** — tokens that don't fit are simply never seen by the model. This is why production [RAG](#g-rag) systems chunk documents and retrieve only the most relevant chunks rather than dumping entire corpora into the context.
 - **Relevant information is scattered** — attention weights must span long distances and may diffuse across many positions, diluting the signal.
 - **Phrasing distance is too great** — if the question's vocabulary doesn't align well with the document's vocabulary, the learned query–key dot products may not produce high scores even for the correct positions.
 - **The fact requires multi-step reasoning** — a single forward pass may not reliably chain together several individually correct attention steps.
 
 ### This project
 
-This model has no RAG machinery and no mechanism to incorporate external documents. The weights are the only knowledge store, and they encode nothing but patterns learned from TinyStories. The same transformer forward pass that a RAG system uses is happening here — but the context window contains only your `--prompt`, nothing else.
+This model has no [RAG](#g-rag) machinery and no mechanism to incorporate external documents. The weights are the only knowledge store, and they encode nothing but patterns learned from TinyStories. The same transformer forward pass that a [RAG](#g-rag) system uses is happening here — but the context window contains only your `--prompt`, nothing else.
